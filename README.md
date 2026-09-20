@@ -211,10 +211,30 @@ calibrated than the larger models in the bake-off. Observed on this machine:
   model refused to answer.` for **35% of BoolQ** examples and roughly **8% of
   AG News**. These are public benchmark passages, not abusive text — one was a
   BoolQ question about the horror drama *Fear the Walking Dead*. The refusal
-  tracks the **topic of the input**, not how the prompt is written: removing the
-  untrusted-data instruction, dropping the `<document>` tags, or passing the state
-  as raw text each left 16–17 of the 17 reproduced cases still refusing. There is
-  no prompt-side workaround; these arrive as HTTP 422.
+  tracks mainly the **topic of the input**: removing the untrusted-data
+  instruction, dropping the `<document>` tags, or passing the state as raw text
+  each left 16–17 of the 17 reproduced cases still refusing. The prompt is not
+  irrelevant — the next item shows wording moving the refusal count by a third —
+  but no wording tried made these inputs answerable; they arrive as HTTP 422.
+- **The saturation can be prompted away, but nothing is gained by it.** The
+  `probability` prompt asks for values "from 0 to 1" without demanding decimals,
+  so four rewordings that require two-digit decimals between 0.01 and 0.99 were
+  measured on the same 120 examples (single greedy call, no retries):
+
+  | Prompt | Refused | Invalid | Correct of 120 | Answers pinned at 1.0 | Brier ↓ |
+  |---|---:|---:|---:|---:|---:|
+  | current | 29 | 2 | 30 | 70.8% | 1.161 |
+  | "never output exactly 0 or 1" | 39 | 0 | 29 | 2.5% | 1.203 |
+  | the same, asked softly | 37 | 3 | 28 | 7.5% | 1.253 |
+  | the range stated as a fact | 36 | 12 | 29 | 9.7% | 1.110 |
+  | the range in the format lines only | 38 | 0 | 26 | 0.0% | 1.298 |
+
+  Every rewording removes the pinning and none improves accuracy or Brier; what
+  they do change is the refusal count, which rises by a quarter to a third
+  whatever the wording. The numbers look more like probabilities without being
+  better ones, so the prompt was left as it is. `vote` remains the way to get
+  graded, more accurate answers from this model (AG News, answered only: 78.1%
+  against 10–30% for any of the prompts above).
 - **`fm serve` does not stop generating when the client disconnects, and it
   handles requests one at a time.** LocalJev aborts a request on timeout and
   aborts the remaining samples of a `vote` whose sibling failed; the abort reaches
