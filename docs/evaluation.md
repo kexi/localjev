@@ -1,16 +1,18 @@
 # Reproducible local model evaluation
 
-The benchmark runs **the actual TypeScript `Engine` used by LocalJev**, against the
-configured local OpenAI-compatible inference server. No Python, hosted inference,
-LLM-as-judge, or synthetic gold labels are used. It does not require the LocalJev
-HTTP server to be running.
+The benchmark runs **the actual TypeScript `Engine` used by LocalJev**, against
+either backend: a local OpenAI-compatible inference server (oMLX), or the
+on-device Apple Foundation Model, for which the runner starts and stops its own
+`fm serve` per model. No Python, hosted inference, LLM-as-judge, or synthetic gold
+labels are used. It does not require the LocalJev HTTP server to be running.
 
 ## What it answers
 
-For the *current prompted-probability backend*, which installed model offers the
-best quality/latency tradeoff? How does that change when the same evidence is buried
-in a longer input? This is not a benchmark of direct logits, single-pass reads,
-TypeSafe Jev, or OpenJev's patched-vLLM backend.
+Which installed model — and which answer mode — offers the best quality/latency
+tradeoff? How does that change when the same evidence is buried in a longer input?
+Both modes are still prompted: `probability` asks the model to report numbers,
+`vote` counts constrained label samples. This is not a benchmark of direct logits,
+single-pass reads, TypeSafe Jev, or OpenJev's patched-vLLM backend.
 
 The default matrix in [`eval/default.json`](../eval/default.json) is:
 
@@ -22,11 +24,38 @@ The default matrix in [`eval/default.json`](../eval/default.json) is:
 - One question per request, one request in flight. Two excluded warm-ups per model.
 - Temperature 0, thinking disabled, 256 maximum output tokens, up to 2 corrective
   retries (same behavior as LocalJev), 90-second timeout per upstream attempt.
+  `config.temperature` applies to `probability` mode only: a `vote` model samples
+  at its own `voteTemperature` (default 1), because identical samples would make
+  every vote unanimous. The report names the effective temperature per model, and
+  the manifest records it under `effectiveSettings`.
 - No 12B model is included: it was not installed/available in this setup.
 - Ornith is not included: this experiment compares the five explicitly selected models.
 
 A pilot with `--limit 3` exercises one example per task, **not a meaningful evaluation**.
 Increase samples for a stronger result before making production choices.
+
+### Selecting models and answer modes
+
+Each entry of `models` is either a bare string — an oMLX model id on the `openai`
+backend, in `probability` mode — or an object:
+
+| Field | Required | Meaning |
+|---|---|---|
+| `backend` | yes | `"openai"` or `"apple"` |
+| `model` | `openai` only | Upstream model id. The `apple` backend defaults to `"system"` |
+| `answerMode` | no | `"probability"` (default) or `"vote"` |
+| `voteSamples` | `vote` only | Samples per decision; default 5 |
+| `voteTemperature` | `vote` only | Sampling temperature; default 1 |
+
+Unknown keys are rejected rather than ignored, so a typo fails the run instead of
+quietly measuring something else. `voteSamples` and `voteTemperature` are only
+accepted alongside `answerMode: "vote"`. Labels are the model id for a string,
+`apple:<model>` for the apple backend, and a `:voteN` suffix in vote mode — so
+`{ "backend": "apple", "answerMode": "vote", "voteSamples": 5 }` is reported as
+`apple:system:vote5` and can appear in the same config as its probability twin.
+
+[`eval/apple.json`](../eval/apple.json) does exactly that, comparing both modes of
+the on-device model over the same examples.
 
 ## Gold datasets and provenance
 
@@ -121,21 +150,39 @@ that could invalidate its label.
 - Cache-busting adds a small prompt perturbation. Temperature 0 and a fixed seed do
   not guarantee bit-for-bit determinism across kernels, runtime versions, or runs.
 - oMLX may enforce schemas through a grammar for ordinary AR models while falling
-  back to prompting for diffusion. Thus the requests share a logical schema, but
-  their actual prompts/token counts and enforcement can differ. This is a realistic
-  **model + runner + LocalJev** comparison, not an isolated architecture experiment.
+  back to prompting for diffusion; `fm serve` applies its own constrained decoding.
+  Thus the requests share a logical schema, but their actual prompts/token counts
+  and enforcement can differ. This is a realistic **model + runner + LocalJev**
+  comparison, not an isolated architecture experiment.
+- Cache behaviour is an oMLX notion. In the recorded apple runs `fm serve`
+  reported neither `prompt_tokens_details.cached_tokens` nor `usage.total_time`,
+  so the cached-input column is 0 and backend time is blank for apple rows
+  whatever `cacheMode` says. `bust-prefix` still perturbs its prompts identically,
+  which keeps the two backends comparable on wall time and token counts.
 
 Each attempt records wall time, status, prompt/output/cached tokens, backend
 `total_time` when present, finish reason, reasoning-output length, warning headers
-and request/response hashes. No credential headers or raw prompts/completions are
-saved. Self-reported probabilities are normalized by the production Engine before
-being scored. Retries' token usage and time are included.
+and request/response hashes, plus the vote `sample` index and corrective `retry`
+index the Engine labelled the request with. Those two labels are what keep a vote
+model's N samples from being counted as N-1 retries; results recorded before the
+labels existed are still read, with every request past the first treated as a
+retry. No credential headers or raw prompts/completions are saved. Whatever distribution the production Engine returns is normalized before
+being scored: the model's **self-reported** numbers in `probability` mode, and
+**sample frequencies quantized to 1/K** in `vote` mode. These are different kinds
+of estimate; compare the modes as modes, not as two calibrated numbers on one
+scale. Retries' token usage and time are included; in vote mode one decision
+issues K requests, so its latency and token counts cover all of them.
 
 ## Run (fish, bash, or zsh)
 
-1. Load/install the selected model checkpoints in oMLX. The runner preflights the
-   model list and refuses missing model IDs; it will not silently skip a model.
+1. For `openai` models, load/install the selected checkpoints in oMLX. The runner
+   preflights the model list and refuses missing model IDs; it will not silently
+   skip a model. For `apple` models nothing has to be running: the runner starts
+   its own `fm serve` per model and stops it again, but macOS 27 with Apple
+   Intelligence enabled and an accepted `fm license` is required.
 2. Configure your key in the ignored `.env` (or your environment), as for LocalJev.
+   The apple backend needs no key. `LOCALJEV_UPSTREAM` is only consulted for
+   `openai` models; apple models always use their own managed server.
 3. Install dependencies and run:
 
 ```sh
@@ -158,16 +205,23 @@ than flooding a broken server.
 ### Resume an interrupted run
 
 Ctrl-C finishes the in-flight request, writes it, generates a partial report, and
-stops. Resume skips already completed request keys (including recorded failures):
+stops. This is a "complete and save the current request, then stop" policy, not a
+guarantee of immediate cancellation: the signal aborts an `fm serve` that is still
+starting, but a request already sent upstream runs to completion so its result is
+not lost. Resume skips already completed request keys (including recorded failures):
 
 ```sh
 bun run eval --resume eval/runs/my-bakeoff
 ```
 
 Use the same `--config` and `--limit`, if supplied originally. Resume checks the
-config, source/suite hash, sample count, and inference/sampling code hashes. It
-refuses to mix changed experiments. New warm-ups are recorded for remaining models;
-resumed timings may span different thermal/cache/runtime conditions.
+config, source/suite hash, sample count, inference/sampling code hashes, and the
+recorded `effectiveSettings` — each model's answer mode, vote sample count and
+temperature, and for apple models the `fm` binary path and the macOS build. It
+refuses to mix changed experiments. Runs whose manifest predates `effectiveSettings`
+skip only that check; their code hashes still pin the behaviour. New warm-ups are
+recorded for remaining models; resumed timings may span different thermal, cache
+and runtime conditions.
 
 Only one process can write to a run directory. After a hard kill, a `.lock` file may
 remain: verify that the recorded PID is no longer running before deleting that
@@ -200,7 +254,7 @@ Run directories (ignored by git by default) contain:
 
 | File | Contents |
 |---|---|
-| `manifest.json` | Configuration, sources, sampled row IDs/gold, input/suite/code hashes, machine/runtime metadata, available model limits, best-effort safe model-settings snapshot |
+| `manifest.json` | Configuration, sources, sampled row IDs/gold, input/suite/code hashes, machine/runtime metadata, available model limits, per-model `effectiveSettings` (answer mode, vote samples/temperature, `fm` binary, macOS build), best-effort safe model-settings snapshot |
 | `results.jsonl` | One durable line per measured model/example/context, normalized answer and per-attempt telemetry; no source texts |
 | `warmups.jsonl` | Excluded first/warm-up calls |
 | `summary.json` | Machine-readable aggregate quality/timing/confusion matrices and paired context changes |
@@ -250,8 +304,15 @@ Pinned dataset commits, checksums, seeds and code hashes make the test inputs an
 metric computations auditable. The OpenAI model-list API does **not** expose the
 installed weight revision, complete effective runtime settings or tokenization
 version. The manifest records IDs and reported limits, oMLX version, Bun version,
-hardware, and an explicit allow-list from the default local oMLX settings file when
-available (not a guarantee that file is the active configuration).
+hardware, the per-model `effectiveSettings`, and an explicit allow-list from the
+default local oMLX settings file when available (not a guarantee that file is the
+active configuration).
+
+The apple backend is less inspectable still: the model ships with the OS and has
+no version endpoint, so the only identifier recorded is the macOS build number
+(`sw_vers -buildVersion`). An OS update can change the model underneath an
+otherwise identical config, which is why a resume against a different build is
+refused.
 
 For publication-grade repeatability, additionally pin the actual model files,
 quantization recipe, oMLX/MLX versions and per-model settings, repeat runs with

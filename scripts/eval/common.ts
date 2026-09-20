@@ -3,10 +3,20 @@ import type { Answer, Question } from "../../src/types";
 
 export const TASKS = ["ag_news", "boolq", "sst5"] as const;
 export type Task = (typeof TASKS)[number];
+/** A plain string is an upstream model id; the object form selects a backend. */
+export type ModelSpec =
+  | string
+  | {
+      backend: "apple" | "openai";
+      model?: string;
+      answerMode?: "probability" | "vote";
+      voteSamples?: number;
+      voteTemperature?: number;
+    };
 export interface EvalConfig {
   seed: number;
   samplesPerTask: number;
-  models: string[];
+  models: ModelSpec[];
   backgroundWords: number[];
   temperature: number;
   maxOutputTokens: number;
@@ -42,6 +52,10 @@ export interface Source {
   format: "parquet" | "jsonl";
 }
 export interface Attempt {
+  /** Vote sample this request belongs to; 0 in probability mode. Absent in runs recorded before vote mode existed. */
+  sample?: number;
+  /** Corrective retry index within that sample; 0 is the first try. */
+  retry?: number;
   ms: number;
   status: number | null;
   inputTokens: number;
@@ -72,6 +86,52 @@ export interface EvaluationRow {
   score: number | null;
   error: string | null;
   attempts: Attempt[];
+}
+export interface ResolvedModel {
+  label: string;
+  model: string;
+  backend: "openai" | "apple";
+  answerMode: "probability" | "vote";
+  voteSamples: number | null;
+  /** Sampling temperature for vote mode; null outside it. */
+  voteTemperature: number | null;
+}
+export const DEFAULT_VOTE_SAMPLES = 5;
+export const DEFAULT_VOTE_TEMPERATURE = 1;
+export function resolveModel(spec: ModelSpec): ResolvedModel {
+  if (typeof spec === "string") return { label: spec, model: spec, backend: "openai", answerMode: "probability", voteSamples: null, voteTemperature: null };
+  const isApple = spec.backend === "apple";
+  const model = spec.model ?? (isApple ? "system" : "");
+  const answerMode = spec.answerMode ?? "probability";
+  const isVote = answerMode === "vote";
+  const voteSamples = isVote ? spec.voteSamples ?? DEFAULT_VOTE_SAMPLES : null;
+  // Pinned in the config rather than read from the environment, so a resumed
+  // run cannot silently sample at a different temperature than the first pass.
+  const voteTemperature = isVote ? spec.voteTemperature ?? DEFAULT_VOTE_TEMPERATURE : null;
+  // Only a vote suffix distinguishes labels, so an unannotated spec keeps the old name.
+  const base = isApple ? `apple:${model}` : model;
+  return { label: voteSamples === null ? base : `${base}:vote${voteSamples}`, model, backend: spec.backend, answerMode, voteSamples, voteTemperature };
+}
+const MODEL_SPEC_KEYS = ["backend", "model", "answerMode", "voteSamples", "voteTemperature"] as const;
+function validModelSpec(spec: unknown): spec is ModelSpec {
+  if (typeof spec === "string") return Boolean(spec);
+  if (typeof spec !== "object" || spec === null || Array.isArray(spec)) return false;
+  const entry = spec as Record<string, unknown>;
+  // A typo like "answermode" would otherwise be dropped and the run would
+  // measure a mode nobody asked for.
+  if (Object.keys(entry).some((key) => !MODEL_SPEC_KEYS.includes(key as (typeof MODEL_SPEC_KEYS)[number]))) return false;
+  const isApple = entry.backend === "apple";
+  if (!isApple && entry.backend !== "openai") return false;
+  const hasModelName = typeof entry.model === "string" && Boolean(entry.model);
+  // An openai spec has no default model id to fall back on.
+  if (!(hasModelName || (isApple && entry.model === undefined))) return false;
+  const hasValidMode = entry.answerMode === undefined || entry.answerMode === "probability" || entry.answerMode === "vote";
+  const hasValidSamples = entry.voteSamples === undefined || (Number.isSafeInteger(entry.voteSamples) && (entry.voteSamples as number) >= 1);
+  const hasValidTemperature = entry.voteTemperature === undefined || (typeof entry.voteTemperature === "number" && Number.isFinite(entry.voteTemperature) && entry.voteTemperature >= 0);
+  // Vote-only fields on a probability spec are a mistake, not a harmless extra.
+  const isVote = entry.answerMode === "vote";
+  const voteFieldsBelong = isVote || (entry.voteSamples === undefined && entry.voteTemperature === undefined);
+  return hasValidMode && hasValidSamples && hasValidTemperature && voteFieldsBelong;
 }
 export function sha256(input: string | Uint8Array): string {
   return createHash("sha256").update(input).digest("hex");
@@ -115,8 +175,9 @@ export async function readConfig(path = "eval/default.json"): Promise<EvalConfig
   if (!c.samplesPerTask || c.samplesPerTask % 20) throw new Error("samplesPerTask must be a positive multiple of 20 (balanced 2/4/5-class tasks)");
   if (!c.maxOutputTokens || !Number.isFinite(c.timeoutSeconds) || c.timeoutSeconds <= 0) throw new Error("Invalid token limit or timeout");
   if (!Number.isFinite(c.temperature) || c.temperature < 0) throw new Error("Invalid temperature");
-  if (!Array.isArray(c.models) || !c.models.length || c.models.some((m) => typeof m !== "string" || !m)) throw new Error("models must be a nonempty list");
-  if (new Set(c.models).size !== c.models.length) throw new Error("Duplicate models");
+  if (!Array.isArray(c.models) || !c.models.length || c.models.some((m) => !validModelSpec(m))) throw new Error("models must be a nonempty list of model ids or { backend: 'apple', model?: string }");
+  const labels = c.models.map((m) => resolveModel(m).label);
+  if (new Set(labels).size !== labels.length) throw new Error("Duplicate models");
   if (!Array.isArray(c.backgroundWords) || !c.backgroundWords.length || c.backgroundWords.some((n) => !Number.isSafeInteger(n) || n < 0 || n > 16384)) throw new Error("backgroundWords must contain integers from 0 to 16384");
   if (new Set(c.backgroundWords).size !== c.backgroundWords.length) throw new Error("Duplicate context profiles");
   if (!["bust-prefix", "shared-prefix"].includes(c.cacheMode)) throw new Error("Invalid cacheMode");

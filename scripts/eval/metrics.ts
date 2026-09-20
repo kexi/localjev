@@ -44,6 +44,18 @@ export function taskMetrics(rows: EvaluationRow[]) {
   };
 }
 
+/**
+ * Corrective retries in one decision, excluding vote samples. A `:voteN`
+ * decision issues N requests with no retry at all, so counting raw requests
+ * would report every vote model as retrying 100% of the time. Rows recorded
+ * before `retry` existed fall back to "requests beyond the first".
+ */
+export function correctiveRetries(row: EvaluationRow): number {
+  const isAnnotated = row.attempts.some((a) => a.retry !== undefined);
+  if (!isAnnotated) return Math.max(0, row.attempts.length - 1);
+  return row.attempts.filter((a) => (a.retry ?? 0) > 0).length;
+}
+
 export function timingMetrics(rows: EvaluationRow[]) {
   const attempts = rows.flatMap((row) => row.attempts);
   const totalSeconds = rows.reduce((sum, row) => sum + row.elapsedMs, 0) / 1000;
@@ -52,9 +64,11 @@ export function timingMetrics(rows: EvaluationRow[]) {
   return {
     requests: rows.length,
     failures: rows.filter((r) => !r.ok).length,
-    firstPassValid: rows.filter((r) => r.ok && r.attempts.length === 1).length,
-    retriedRequests: rows.filter((r) => r.attempts.length > 1).length,
-    additionalAttempts: rows.reduce((sum, r) => sum + Math.max(0, r.attempts.length - 1), 0),
+    // Valid on every sample's first try; a vote decision qualifies when none of
+    // its N samples needed a corrective retry.
+    firstPassValid: rows.filter((r) => r.ok && correctiveRetries(r) === 0).length,
+    retriedRequests: rows.filter((r) => correctiveRetries(r) > 0).length,
+    additionalAttempts: rows.reduce((sum, r) => sum + correctiveRetries(r), 0),
     latencyP50Ms: quantile(rows.map((r) => r.elapsedMs), .5),
     latencyP95Ms: quantile(rows.map((r) => r.elapsedMs), .95),
     latencyMeanMs: mean(rows.map((r) => r.elapsedMs)),

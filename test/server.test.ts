@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { loadSettings } from "../src/config";
-import type { DecisionEngine } from "../src/engine";
+import { type DecisionEngine, UpstreamRejectedError } from "../src/engine";
 import { LocalJevApp } from "../src/server";
 
 const requestBody = {
@@ -59,6 +59,37 @@ describe("Jev API", () => {
     expect(await health.json()).toEqual({ status: "ok" });
     expect(await ready.json()).toMatchObject({ status: "ready" });
     expect((await models.json()).models[0].name).toBe("localjev-latest");
+  });
+
+  test("readiness names the active backend and its upstream model", async () => {
+    const app = new LocalJevApp(
+      loadSettings({ backend: "apple", upstreamModel: "system" }),
+      fakeEngine,
+    );
+    const ready = await app.fetch(new Request("http://localhost/ready"));
+    expect(await ready.json()).toEqual({
+      status: "ready",
+      backend: "apple",
+      upstream_model: "system",
+    });
+  });
+
+  test("a backend refusal answers 422 without inviting a retry", async () => {
+    const refusing: DecisionEngine = {
+      async decide() {
+        throw new UpstreamRejectedError(
+          500,
+          "The model's safety guardrails were triggered.",
+        );
+      },
+    };
+    const app = new LocalJevApp(loadSettings(), refusing);
+    const response = await app.fetch(post(requestBody));
+    expect(response.status).toBe(422);
+    expect(response.headers.get("retry-after")).toBeNull();
+    const body = await response.json();
+    expect(body.detail.error_type).toBe("invalid_request_error");
+    expect(body.detail.message).toContain("safety guardrails");
   });
 
   test("returns Jev-style validation and model errors", async () => {

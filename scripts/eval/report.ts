@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { TASKS, mean, sha256, type EvalConfig, type EvaluationRow } from "./common";
+import { TASKS, mean, resolveModel, sha256, type EvalConfig, type EvaluationRow } from "./common";
 import { taskMetrics, timingMetrics } from "./metrics";
 
 const fixed = (v: number | null, digits = 3) => v === null ? "—" : v.toFixed(digits);
@@ -10,7 +10,13 @@ export async function report(directory: string): Promise<void> {
   const text = await Bun.file(join(directory, "results.jsonl")).text();
   const rows: EvaluationRow[] = text.trim() ? text.trim().split("\n").map((line) => JSON.parse(line)) : [];
   if (new Set(rows.map((r) => r.key)).size !== rows.length) throw new Error("Duplicate results: refusing biased report");
-  const cells = config.models.flatMap((model) => config.backgroundWords.map((words) => {
+  const resolved = config.models.map((spec) => resolveModel(spec));
+  const labels = resolved.map((spec) => spec.label);
+  const hasVoteModel = resolved.some((spec) => spec.answerMode === "vote");
+  // A vote model never samples at config.temperature, so naming one number for
+  // the whole matrix would misreport what was actually asked of the backend.
+  const temperatureByModel = new Map(resolved.map((spec) => [spec.label, spec.voteTemperature ?? config.temperature]));
+  const cells = labels.flatMap((model) => config.backgroundWords.map((words) => {
     const selected = rows.filter((r) => r.model === model && r.backgroundWords === words);
     const tasks = Object.fromEntries(TASKS.map((task) => [task, taskMetrics(selected.filter((r) => r.task === task))]));
     return {
@@ -20,7 +26,7 @@ export async function report(directory: string): Promise<void> {
       tasks, timing: timingMetrics(selected),
     };
   }));
-  const paired = config.models.map((model) => ({
+  const paired = labels.map((model) => ({
     model,
     comparisons: config.backgroundWords.filter((n) => n !== 0).map((words) => {
       const baseline = new Map(rows.filter((r) => r.model === model && r.backgroundWords === 0).map((r) => [r.exampleId, r]));
@@ -43,8 +49,8 @@ export async function report(directory: string): Promise<void> {
   const lines = [
     `# LocalJev bake-off: ${manifest.runId}`, "",
     `Status: **${summary.complete ? "complete" : "PARTIAL"}** (${summary.results}/${summary.expectedResults} measured requests).`, "",
-    `Runtime: Bun ${manifest.environment.bun}; ${manifest.environment.cpu}; ${manifest.environment.memoryGiB} GiB RAM; oMLX ${manifest.backendVersion ?? "unknown"}.`,
-    `Seed ${config.seed}; configured ${config.samplesPerTask} balanced examples/task; selected ${manifest.examples.length} total examples${manifest.examples.length < config.samplesPerTask * 3 ? " (**LIMITED PILOT, not necessarily balanced**)" : ""}; temperature ${config.temperature}; max output ${config.maxOutputTokens}; up to ${config.malformedRetries} corrective retries; one request in flight.`,
+    `Runtime: Bun ${manifest.environment.bun}; ${manifest.environment.cpu}; ${manifest.environment.memoryGiB} GiB RAM;${manifest.backendVersion ? ` oMLX ${manifest.backendVersion};` : ""}${manifest.appleBuild ? ` Apple Foundation Models (macOS build ${manifest.appleBuild});` : ""}${!manifest.backendVersion && !manifest.appleBuild ? " backend version unknown;" : ""}`.replace(/;$/, "."),
+    `Seed ${config.seed}; configured ${config.samplesPerTask} balanced examples/task; selected ${manifest.examples.length} total examples${manifest.examples.length < config.samplesPerTask * 3 ? " (**LIMITED PILOT, not necessarily balanced**)" : ""}; effective temperature ${[...new Set(resolved.map((spec) => `${spec.label} ${temperatureByModel.get(spec.label)}`))].join(", ")}; max output ${config.maxOutputTokens}; up to ${config.malformedRetries} corrective retries; one request in flight.`,
     `Cache policy: **${config.cacheMode}**. Background sizes are **words added**, not context-window settings or exact token budgets. Token counts below are backend-reported.`, "",
     "## Quality × model × input length", "",
     "Accuracy counts failed requests as wrong. SST-5 accuracy uses the highest-probability level; MAE uses the expected score. Macro accuracy weights the three tasks equally.", "",
@@ -55,7 +61,7 @@ export async function report(directory: string): Promise<void> {
     lines.push(`| ${c.model} | ${c.backgroundWords} | ${percent(c.tasks.ag_news!.effectiveAccuracy)} | ${percent(c.tasks.boolq!.effectiveAccuracy)} | ${percent(c.tasks.sst5!.effectiveAccuracy)} | ${fixed(c.tasks.sst5!.scoreMAE)} | ${percent(c.macroTaskAccuracy)} | ${c.timing.failures}/${c.timing.requests} |`);
   }
   lines.push("", "## Decision latency × model × input length", "",
-    "Wall time covers the real LocalJev Engine, tokenization/inference upstream, JSON parsing and corrective retries. Warm-ups/model loading are excluded. Latency includes failed requests. This non-streaming benchmark does **not measure TTFT**. No localhost Bun HTTP hop is included.", "",
+    "Wall time covers the real LocalJev Engine, tokenization/inference upstream, JSON parsing and corrective retries. Warm-ups/model loading are excluded. Latency includes failed requests. This non-streaming benchmark does **not measure TTFT**. No localhost Bun HTTP hop is included." + (hasVoteModel ? " A `:voteN` decision pays for N samples, so its latency and token counts cover all of them." : ""), "",
     "| Model | Background words | p50 (s) ↓ | p95 (s) ↓ | Mean (s) ↓ | Input tokens, first attempt | Output tokens incl. retries | Retried | Cached input |",
     "|---|---:|---:|---:|---:|---:|---:|---:|---:|");
   for (const c of cells) {
@@ -63,7 +69,7 @@ export async function report(directory: string): Promise<void> {
     lines.push(`| ${c.model} | ${c.backgroundWords} | ${fixed(t.latencyP50Ms === null ? null : t.latencyP50Ms / 1000)} | ${fixed(t.latencyP95Ms === null ? null : t.latencyP95Ms / 1000)} | ${fixed(t.latencyMeanMs === null ? null : t.latencyMeanMs / 1000)} | ${fixed(t.firstAttemptInputTokensMean, 0)} | ${fixed(t.outputTokensMean, 1)} | ${t.retriedRequests}/${t.requests} | ${percent(t.reportedCachedFraction)} |`);
   }
   lines.push("", "## Per-task uncertainty and calibration", "",
-    "Wilson 95% intervals are indicative, unadjusted for multiple comparisons and class-stratified sampling. Calibration/F1/MAE are conditional on valid responses: always inspect coverage above. ECE uses 10 equal-width bins and **max class probability**, not LocalJev's entropy-based confidence. Tiny samples make ECE noisy. Brier is `(p_yes-y)²` for BoolQ and the sum over class errors for multiclass tasks; do not compare its magnitude across tasks. NLL clips probabilities at 1e-12; all probability metrics concern self-reported, normalized model outputs.", "",
+    "Wilson 95% intervals are indicative, unadjusted for multiple comparisons and class-stratified sampling. Calibration/F1/MAE are conditional on valid responses: always inspect coverage above. ECE uses 10 equal-width bins and **max class probability**, not LocalJev's entropy-based confidence. Tiny samples make ECE noisy. Brier is `(p_yes-y)²` for BoolQ and the sum over class errors for multiclass tasks; do not compare its magnitude across tasks. NLL clips probabilities at 1e-12. Probability metrics score the normalized distribution LocalJev returns: self-reported numbers in `probability` mode, and sample frequencies quantized to 1/K in `:voteN` mode." + (hasVoteModel ? " The two are not the same kind of estimate; compare them as modes, not as calibrated numbers on one scale." : ""), "",
     "| Model | Background | Task | Correct / total | Accuracy 95% interval | Macro F1 | Brier ↓ | NLL ↓ | ECE ↓ |",
     "|---|---:|---|---:|---|---:|---:|---:|---:|");
   for (const c of cells) for (const task of TASKS) {
@@ -74,8 +80,11 @@ export async function report(directory: string): Promise<void> {
     "| Model | Added words | Valid pairs | Prediction changed | Correct → wrong | Wrong → correct |",
     "|---|---:|---:|---:|---:|---:|");
   for (const p of paired) for (const c of p.comparisons) lines.push(`| ${p.model} | ${c.backgroundWords} | ${c.bothValid} | ${c.predictionsChanged} | ${c.correctToWrong} | ${c.wrongToCorrect} |`);
+  const voteNote = hasVoteModel
+    ? " **For `:voteN` models one decision issues N sampling requests.** Samples are not retries: the counts below record only corrective retries, so \"first-pass valid\" means every sample was valid on its first try, and \"additional attempts\" excludes the N-1 sibling samples. Runs recorded before samples were labelled fall back to counting every request past the first as a retry."
+    : "";
   lines.push("", "## Output diagnostics", "",
-    "Grammar-valid JSON can still contain semantically invalid probabilities (such as all zeros). Retries recover some of these; length-limited attempts and reasoning are shown separately. No warnings returned is not proof of schema enforcement.", "",
+    "Grammar-valid JSON can still contain semantically invalid probabilities (such as all zeros). Retries recover some of these; length-limited attempts and reasoning are shown separately. No warnings returned is not proof of schema enforcement." + voteNote, "",
     "| Model | Background | First-pass valid / requests | Additional attempts | Length-limited attempts | Reasoning attempts |",
     "|---|---:|---:|---:|---:|---:|");
   for (const c of cells) {
@@ -86,10 +95,13 @@ export async function report(directory: string): Promise<void> {
   for (const row of rows.filter((r) => !r.ok)) errors.set(row.error ?? "unknown", (errors.get(row.error ?? "unknown") ?? 0) + 1);
   if (errors.size) lines.push("", "Terminal errors:", ...[...errors].map(([message, n]) => `- ${n} × ${message.replaceAll("\n", " ")}`));
   const warmups = await Bun.file(join(directory, "warmups.jsonl")).text();
+  const warmupRows = warmups.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  // Older manifests predate warmupRequests; fall back to what was recorded.
+  const warmupsPerModel = config.warmupRequests ?? warmupRows.length;
   lines.push("", "## Excluded warm-ups / first-call overhead", "",
-    "The first call may include model loading/eviction/compilation; these are **not isolated cold-load measurements**. Two short warm-ups do not guarantee every prompt shape is compiled. New model load behavior and runtime settings can affect the first calls.", "",
+    `The first call may include model loading/eviction/compilation; these are **not isolated cold-load measurements**. ${warmupsPerModel} short warm-up${warmupsPerModel === 1 ? "" : "s"} per model (${warmupRows.length} recorded) do${warmupsPerModel === 1 ? "es" : ""} not guarantee every prompt shape is compiled. New model load behavior and runtime settings can affect the first calls.`, "",
     "| Model | Warm-up | Seconds | Valid |", "|---|---:|---:|---|");
-  for (const w of warmups.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))) lines.push(`| ${w.model} | ${w.index + 1} | ${(w.ms / 1000).toFixed(3)} | ${w.ok} |`);
+  for (const w of warmupRows) lines.push(`| ${w.model} | ${w.index + 1} | ${(w.ms / 1000).toFixed(3)} | ${w.ok} |`);
   lines.push("", "## Caveats and provenance", "",
     "- Public benchmark contamination is possible. These are held-out dataset splits, not guaranteed unseen pretraining data; this is not a Jev-vs-model benchmark.",
     "- Balanced sampling changes class priors. The background condition is an artificial distraction/prefill stress test, not a new natural long-document dataset. The complete target stays in the middle; no evidence is truncated.",

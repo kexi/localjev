@@ -13,6 +13,7 @@ import {
   MalformedModelOutputError,
   OverloadedError,
   UpstreamHttpError,
+  UpstreamRejectedError,
 } from "./engine";
 import {
   RequestValidationError,
@@ -147,6 +148,7 @@ export class LocalJevApp {
       }
       return jsonResponse({
         status: "ready",
+        backend: this.settings.backend,
         upstream_model: this.settings.upstreamModel,
       });
     }
@@ -210,6 +212,15 @@ export class LocalJevApp {
         error instanceof BackendProtocolError
       ) {
         return apiError(502, "api_error", error.message);
+      }
+      // No retry-after: the backend refused this exact input, so resending it
+      // would fail identically.
+      if (error instanceof UpstreamRejectedError) {
+        return apiError(
+          422,
+          "invalid_request_error",
+          `The inference backend rejected this request: ${error.message}`,
+        );
       }
       if (
         error instanceof UpstreamHttpError ||

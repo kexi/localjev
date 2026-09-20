@@ -1,0 +1,15 @@
+{
+  "seed": 20260920,
+  "samplesPerTask": 40,
+  "models": [
+    { "backend": "apple" },
+    { "backend": "apple", "answerMode": "vote", "voteSamples": 5, "voteTemperature": 1 }
+  ],
+  "backgroundWords": [0],
+  "temperature": 0,
+  "maxOutputTokens": 256,
+  "malformedRetries": 2,
+  "timeoutSeconds": 90,
+  "warmupRequests": 1,
+  "cacheMode": "bust-prefix"
+}

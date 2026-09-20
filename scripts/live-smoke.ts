@@ -1,9 +1,12 @@
 import { loadSettings } from "../src/config";
-import { Engine } from "../src/engine";
+import {
+  INTERRUPTED_EXIT_CODE,
+  InterruptedError,
+  withManagedBackend,
+} from "../src/main";
 import type { Question } from "../src/types";
 
 const settings = loadSettings();
-const engine = new Engine(settings);
 
 const questions: Record<string, Question> = {
   department: {
@@ -27,21 +30,34 @@ const questions: Record<string, Question> = {
   },
 };
 
-const result = await engine.decide(
-  questions,
-  "Hi, I have been trying to connect Stripe but keep getting a 403 error.",
-  1234,
-);
-console.log(
-  JSON.stringify(
-    {
-      answers: result.answers,
-      usage: {
-        input_tokens: result.inputTokens,
-        output_tokens: result.outputTokens,
-      },
-    },
-    null,
-    2,
-  ),
-);
+try {
+  await withManagedBackend(settings, async (engine) => {
+    const result = await engine.decide(
+      questions,
+      "Hi, I have been trying to connect Stripe but keep getting a 403 error.",
+      1234,
+    );
+    console.log(
+      JSON.stringify(
+        {
+          backend: settings.backend,
+          answer_mode: settings.answerMode,
+          answers: result.answers,
+          usage: {
+            input_tokens: result.inputTokens,
+            output_tokens: result.outputTokens,
+          },
+        },
+        null,
+        2,
+      ),
+    );
+  });
+} catch (error) {
+  // A signal is not a success, even though teardown completed normally.
+  if (error instanceof InterruptedError) {
+    console.error(error.message);
+    process.exit(INTERRUPTED_EXIT_CODE);
+  }
+  throw error;
+}
