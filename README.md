@@ -215,6 +215,15 @@ calibrated than the larger models in the bake-off. Observed on this machine:
   untrusted-data instruction, dropping the `<document>` tags, or passing the state
   as raw text each left 16–17 of the 17 reproduced cases still refusing. There is
   no prompt-side workaround; these arrive as HTTP 422.
+- **`fm serve` does not stop generating when the client disconnects, and it
+  handles requests one at a time.** LocalJev aborts a request on timeout and
+  aborts the remaining samples of a `vote` whose sibling failed; the abort reaches
+  LocalJev's side within milliseconds, but the abandoned generation still runs to
+  its token limit and the next request queues behind it. Measured: a short request
+  took 0.56 s on an idle server, 0.81 s right after aborting a vote-sized sample,
+  and 9.96 s right after aborting a 600-token generation. The apple default of
+  `LOCALJEV_MAX_OUTPUT_TOKENS=512` is what bounds this; raising it raises the
+  worst-case stall after every timeout.
 
 Treat it as a zero-setup default for development and low-stakes routing, not as a
 calibrated probability source. Measure it on your own workload first; see
