@@ -155,7 +155,17 @@ function validateQuestion(raw: unknown, path: (string | number)[]): Question {
   fail([...path, "type"], "Question type must be 'noul', 'choice', or 'score'", raw.type);
 }
 
-export function validateSystemOneRequest(raw: unknown): SystemOneRequest {
+/**
+ * Extra, configuration-dependent checks run after the Jev-shape validation.
+ * Kept as a hook so `types.ts` stays free of settings while extensions such as
+ * images can still reject a request with the same 422 shape.
+ */
+export type RequestCheck = (body: SystemOneRequest) => void;
+
+export function validateSystemOneRequest(
+  raw: unknown,
+  check?: RequestCheck,
+): SystemOneRequest {
   if (!object(raw)) {
     fail([], "Request body must be an object", raw);
   }
@@ -183,9 +193,11 @@ export function validateSystemOneRequest(raw: unknown): SystemOneRequest {
   for (const [key, value] of entries) {
     questions[key] = validateQuestion(value, ["questions", key]);
   }
-  return {
+  const body: SystemOneRequest = {
     state: raw.state as SystemOneRequest["state"],
     model: raw.model,
     questions,
   };
+  check?.(body);
+  return body;
 }

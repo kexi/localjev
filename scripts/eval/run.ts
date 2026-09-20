@@ -24,8 +24,10 @@ export function answerValues(answer: Answer, example: Example) {
 function command(args: string[]): string | null {
   try { const p = Bun.spawnSync(args); return p.exitCode === 0 ? p.stdout.toString().trim() : null; } catch { return null; }
 }
-async function codeHashes() {
-  const files = ["src/engine.ts", "src/types.ts", "src/config.ts", "src/apple.ts", "bun.lock", "scripts/eval/common.ts", "scripts/eval/data.ts", "scripts/eval/run.ts"];
+export async function codeHashes() {
+  // src/images.ts included because every decision, images or not, is walked by
+  // extractImages; a resume must not mix results from two preprocessing rules.
+  const files = ["src/engine.ts", "src/types.ts", "src/config.ts", "src/apple.ts", "src/images.ts", "bun.lock", "scripts/eval/common.ts", "scripts/eval/data.ts", "scripts/eval/run.ts"];
   return Object.fromEntries(await Promise.all(files.map(async (p) => [p, sha256(await Bun.file(p).bytes())])));
 }
 async function localModelSettings(models: string[]) {

@@ -71,6 +71,7 @@ describe("Jev API", () => {
       status: "ready",
       backend: "apple",
       upstream_model: "system",
+      extensions: [],
     });
   });
 

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { hashOrder, quantile, readConfig, resolveModel, type EvaluationRow, type Example, type Suite } from "../scripts/eval/common";
 import { balancedSample, makeState } from "../scripts/eval/data";
 import { correctiveRetries, taskMetrics, timingMetrics, wilson } from "../scripts/eval/metrics";
-import { answerValues, effectiveSettings } from "../scripts/eval/run";
+import { answerValues, codeHashes, effectiveSettings } from "../scripts/eval/run";
 import { report } from "../scripts/eval/report";
 
 const example: Example = {
@@ -261,3 +261,15 @@ describe("evaluation model specs", () => {
 async function appendDuplicate(directory: string) {
   await Bun.write(join(directory, "results.jsonl"), [row(), row()].map((r) => JSON.stringify(r)).join("\n") + "\n");
 }
+
+describe("run provenance", () => {
+  test("every source file a decision depends on is hashed, images included", async () => {
+    const hashes = await codeHashes();
+    // extractImages runs for every decision, images or not, so a resume that
+    // ignored it could mix results from two different preprocessing rules.
+    for (const file of ["src/engine.ts", "src/images.ts", "src/types.ts", "src/config.ts"]) {
+      expect(Object.keys(hashes)).toContain(file);
+      expect(hashes[file]).toMatch(/^[0-9a-f]{64}$/);
+    }
+  });
+});

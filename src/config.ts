@@ -1,9 +1,14 @@
 export type Backend = "openai" | "apple";
 export type AnswerMode = "probability" | "vote";
+/** Opt-in behaviour that goes beyond the Jev protocol LocalJev mirrors. */
+export type Extension = "images";
 
 export interface Settings {
   backend: Backend;
   answerMode: AnswerMode;
+  extensions: ReadonlySet<Extension>;
+  maxImages: number;
+  maxImageBytes: number;
   voteSamples: number;
   voteTemperature: number;
   fmBinary: string;
@@ -57,6 +62,25 @@ function answerModeSetting(fallback: AnswerMode): AnswerMode {
   return raw;
 }
 
+const EXTENSIONS: readonly Extension[] = ["images"];
+
+function extensionsSetting(): ReadonlySet<Extension> {
+  const raw = process.env.LOCALJEV_EXTENSIONS ?? "";
+  const named = raw
+    .split(",")
+    .map((name) => name.trim().toLowerCase())
+    .filter((name) => name !== "");
+  for (const name of named) {
+    const isKnown = (EXTENSIONS as readonly string[]).includes(name);
+    if (!isKnown) {
+      throw new Error(
+        `LOCALJEV_EXTENSIONS may only name: ${EXTENSIONS.join(", ")}`,
+      );
+    }
+  }
+  return new Set(named as Extension[]);
+}
+
 // The on-device model has a 4096-token context, so the apple backend asks for
 // smaller batches than the oMLX defaults. Why not one shared default: a single
 // conservative number would needlessly slow the roomier oMLX upstream down.
@@ -86,6 +110,9 @@ export function loadSettings(
     answerMode: answerModeSetting(
       isApple ? APPLE_DEFAULTS.answerMode : "probability",
     ),
+    extensions: extensionsSetting(),
+    maxImages: integerSetting("LOCALJEV_MAX_IMAGES", 4, 1),
+    maxImageBytes: integerSetting("LOCALJEV_MAX_IMAGE_BYTES", 5_000_000, 1),
     voteSamples: integerSetting("LOCALJEV_VOTE_SAMPLES", 5, 1),
     // Why not reuse LOCALJEV_TEMPERATURE: it defaults to 0, and identical
     // samples would make every vote unanimous regardless of real uncertainty.

@@ -8,6 +8,7 @@ import {
 } from "../src/lifecycle";
 import {
   InterruptedError,
+  maxRequestBodySize,
   run,
   withManagedBackend,
   type RunDependencies,
@@ -594,5 +595,57 @@ describe("scripts that own a backend directly", () => {
     await withManagedBackend(settings(), async () => "ok", signals.options);
     // Why it matters: a stray 10s timer used to delay the script's exit.
     expect(signals.pendingTimers()).toBe(0);
+  });
+});
+
+describe("request body ceiling", () => {
+  test("a text-only server keeps a fixed allowance", () => {
+    expect(maxRequestBodySize(loadSettings())).toBe(16 * 1024 * 1024);
+  });
+
+  test("enabling images raises it by the base64 worst case the limits allow", () => {
+    const settings = loadSettings({
+      extensions: new Set(["images" as const]),
+      maxImages: 4,
+      maxImageBytes: 5_000_000,
+    });
+    // 4 images x the padded base64 length of 5_000_000 bytes, plus the text allowance.
+    expect(maxRequestBodySize(settings)).toBe(
+      4 * (4 * Math.ceil(5_000_000 / 3)) + 16 * 1024 * 1024,
+    );
+  });
+
+  test("the per-image allowance is the padded base64 length, not a rounded ratio", () => {
+    const allowance = (maxImageBytes: number) =>
+      maxRequestBodySize(
+        loadSettings({
+          extensions: new Set(["images" as const]),
+          maxImages: 1,
+          maxImageBytes,
+        }),
+      ) -
+      16 * 1024 * 1024;
+    // 1, 2 and 3 bytes all encode to one 4-character group; 4 bytes needs two.
+    expect([1, 2, 3, 4].map(allowance)).toEqual([4, 4, 4, 8]);
+  });
+
+  test("the configured ceiling reaches the server it starts", async () => {
+    const settings = loadSettings({
+      extensions: new Set(["images" as const]),
+      maxImages: 1,
+    });
+    const test = harness();
+    let seen = -1;
+    const started = run(settings, {
+      ...test.dependencies,
+      serve: (options) => {
+        seen = options.maxRequestBodySize;
+        return test.dependencies.serve(options);
+      },
+    });
+    await test.backendStarting;
+    test.raise("SIGINT");
+    await started;
+    expect(seen).toBe(maxRequestBodySize(settings));
   });
 });

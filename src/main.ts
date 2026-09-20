@@ -20,7 +20,22 @@ export interface ServeOptions {
   hostname: string;
   port: number;
   idleTimeout: number;
+  maxRequestBodySize: number;
   fetch(request: Request): Promise<Response>;
+}
+
+/**
+ * Body ceiling for the HTTP server, so an oversized upload is dropped by Bun
+ * before `request.json()` holds all of it in memory. Text-only deployments keep
+ * a roomy 16 MB — well above any realistic `state` — while enabling images adds
+ * the base64-inflated worst case the image limits already allow.
+ */
+export function maxRequestBodySize(settings: Settings): number {
+  const TEXT_ALLOWANCE = 16 * 1024 * 1024;
+  if (!settings.extensions.has("images")) return TEXT_ALLOWANCE;
+  // Padded base64 spends 4 characters on every started group of 3 bytes.
+  const perImage = 4 * Math.ceil(settings.maxImageBytes / 3);
+  return settings.maxImages * perImage + TEXT_ALLOWANCE;
 }
 
 export interface CreatedBackend {
@@ -109,6 +124,7 @@ export async function run(
       hostname: settings.host,
       port: settings.port,
       idleTimeout: 255,
+      maxRequestBodySize: maxRequestBodySize(settings),
       fetch: (request) => app.fetch(request),
     });
     // stop(true) closes active connections: waiting for an in-flight decision

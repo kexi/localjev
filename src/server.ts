@@ -15,6 +15,7 @@ import {
   UpstreamHttpError,
   UpstreamRejectedError,
 } from "./engine";
+import { extractImages } from "./images";
 import {
   RequestValidationError,
   type SystemOneRequest,
@@ -150,6 +151,7 @@ export class LocalJevApp {
         status: "ready",
         backend: this.settings.backend,
         upstream_model: this.settings.upstreamModel,
+        extensions: [...this.settings.extensions],
       });
     }
     if (request.method === "GET" && pathname === "/v1/models") {
@@ -171,7 +173,15 @@ export class LocalJevApp {
 
     let body: SystemOneRequest;
     try {
-      body = validateSystemOneRequest(raw);
+      // The same walk the engine performs, run here so a bad image is a 422
+      // before any backend work starts.
+      body = validateSystemOneRequest(raw, (candidate) => {
+        extractImages(
+          candidate.state,
+          this.settings,
+          this.settings.extensions.has("images"),
+        );
+      });
     } catch (error) {
       if (error instanceof RequestValidationError) {
         return jsonResponse({ detail: [error.issue] }, 422);
